@@ -21,6 +21,7 @@
 #include "pollLib.h"
 #include "windowing.h"
 #include "buffering.h"
+#include "checksum.h"
 
 #define MAXBUF 1407
 #define MAXPAYLOAD 1400
@@ -28,7 +29,7 @@
 typedef enum State STATE;
 
 enum State {
-	SETUP_STATE, FILENAME, FILE_OK, SEND_DATA, WAIT_ON_ACK, DONE
+	FILENAME, FILE_OK, SEND_DATA, WAIT_ON_ACK, DONE
 };
 
 enum FLAG {
@@ -37,6 +38,7 @@ enum FLAG {
 
 void processFile(char *argv[], int socketNum, int portNumber, struct sockaddr_in6 *server);
 STATE sendSetupPacket(char *argv[], int socketNum, struct sockaddr_in6 *server);
+STATE dataTransfer(int socketNum, struct sockaddr_in6 *server, char *from_file, int window_size, int buffer_size);
 void talkToServer(int socketNum, struct sockaddr_in6 * server);
 int readFromStdin(char * buffer);
 int checkArgs(int argc, char * argv[]);
@@ -65,21 +67,113 @@ void processFile(char *argv[], int socketNum, int portNumber, struct sockaddr_in
 
 	while (state != DONE) {
 		switch (state) {
-			// case SETUP_STATE:
-			// 	state = start_state(argv, portNumber, &server);
-			// 	break;
-			case FILENAME: 
+			case FILENAME: {
 				state = sendSetupPacket(argv, socketNum, server);
 				break; 
-			case SEND_DATA: 
-				state = dataTransferSelRepeat(socketNum, server);
+			}
+			
+			case FILE_OK: {
+				state = SEND_DATA;
 				break;
+			}
+
+			case SEND_DATA: {
+				char *from_file = argv[1];
+				int window_size = atoi(argv[3]);
+				int buffer_size = atoi(argv[4]);
+				state = dataTransfer(socketNum, server, from_file, window_size, buffer_size);
+				break;
+			}
+
+			case WAIT_ON_ACK: {
+				//do stuff
+				state = DONE; 
+				break; 
+			}
+
+			case DONE: {
+				state = DONE; 
+				break; 
+			}
+
+			default: 
+				state = DONE; 
 		}
 	}
 }
 
-STATE dataTransferSelRepeat(int socketNum, struct sockaddr_in6 *server) {
-	
+STATE dataTransfer(int socketNum, struct sockaddr_in6 *server, char *from_file, int window_size, int buffer_size) {
+	int serverAddrLen = sizeof(struct sockaddr_in6); 
+
+	struct SR_buffer *window_buffer = initializeWindow(window_size); 
+	int eof = 0;
+
+	//if file exists, open
+	int from_file_fd = open(from_file, O_RDONLY);
+	if (from_file_fd == -1) {
+		perror("failed to open file");
+		exit(-1);
+	}
+
+	int nextSeqNum = getSeqNum() + 1; 
+	while ((eof == 0) && (checkWindowOpen(nextSeqNum, window_size) == 1)) {
+
+		//read data from disk
+        uint8_t disk_buffer[buffer_size];
+        int bytes_read = read(from_file_fd, disk_buffer, buffer_size);
+        if (bytes_read < 0) {
+            perror("read didn't work");
+			close(from_file_fd);
+			free(window_buffer);
+            exit(-1);
+        }
+
+        else if (bytes_read == 0) {
+            //reached EOF
+			eof = 1; 
+			break;
+        }
+
+		int seqNum = getNextSeqNum(); 
+
+        //create PDU
+        uint8_t pduBuffer[MAX_PDU];
+        int pduLen = createWindowPacket(pduBuffer, seqNum, disk_buffer, bytes_read);
+
+		//store in window buffer
+        windowStorePacket(window_buffer, seqNum, pduBuffer, pduLen, window_size);
+
+        //send data
+        safeSendto(socketNum, pduBuffer, pduLen, 0, (struct sockaddr *)server, serverAddrLen);
+
+
+        //check if there's data to process
+		int pollResult = 0; 
+        while ((pollResult = pollCall(0)) > 0) {
+
+			//process RR or SREJ
+			uint8_t received_PDU[MAXBUF];
+			int bytes_recv = safeRecvfrom(socketNum, received_PDU, MAXBUF, 0, (struct sockaddr *)server, &serverAddrLen);
+
+			//check data hasn't been changed
+			unsigned short checksum = in_cksum((unsigned short *)received_PDU, bytes_recv);
+			if (checksum != 0) {
+				fprintf(stderr, "checksum failed\n");
+				return DONE; 
+			}
+
+			//parse data
+			int flag = received_PDU[6];
+			if (flag == RR_PACKET) {
+				processRRpacket(received_PDU, seqNum, window_buffer, window_size);
+			}
+			else if (flag == SREJ_PACKET) {
+				processSREJpacket(received_PDU, socketNum, server, window_size, window_buffer);
+			}
+		}
+	}
+
+	return WAIT_ON_ACK;
 }
 
 STATE sendSetupPacket(char *argv[], int socketNum, struct sockaddr_in6 *server) {

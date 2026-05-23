@@ -2,17 +2,162 @@
 #include <string.h>
 #include <stdint.h>
 #include <arpa/inet.h>
+#include <unistd.h>
+#include <stdlib.h>
 
 #include "checksum.h"
 #include "windowing.h"
+#include "pollLib.h"
+#include "safeUtil.h"
+#include "buffering.h"
 
 #define RR_PDU_SIZE 11
 #define MAX_PDU 1407
 
 static int lower = 0;
-static int upper = 0;
-static int current = 0; 
-static int sequenceNum = 2; 
+static int sequenceNum = 0; 
+
+struct SR_buffer *initializeWindow(int window_size) {
+
+    struct SR_buffer *buffer = malloc(window_size * sizeof(struct SR_buffer));
+    if (buffer == NULL) {
+        perror("malloc failed");
+        exit(-1);
+    }
+
+    //initialize values to default
+    int i = 0; 
+    for (i = 0; i < window_size; i++) {
+        buffer[i].pduLen = 0; 
+        buffer[i].sequenceNumber = 0; 
+        buffer[i].validFlag = 0; 
+    }
+
+    return buffer;
+}
+
+int checkWindowOpen(int nextSeqNum, int window_size) {
+    int window_open = 0; 
+    int upper = lower + window_size;
+
+    if (nextSeqNum < upper) {
+        //window is open
+        window_open = 1; 
+    }
+
+    return window_open;
+}
+
+int createWindowPacket(uint8_t *packetBuffer, int sn, uint8_t *payload, int payloadLen) {
+    int pduLen = 0;
+    int flag = 3;
+    
+    pduLen = createPDU(packetBuffer, sn, flag, payload, payloadLen);    
+
+    return pduLen;
+}
+
+int windowStorePacket(struct SR_buffer *window_buffer, int sn, uint8_t *pdu, int pduLen, int window_size) {
+    int index = sn % window_size;
+
+    memcpy(window_buffer[index].buff, pdu, pduLen);
+    window_buffer[index].pduLen = pduLen;
+    window_buffer[index].sequenceNumber = sn;
+    window_buffer[index].validFlag = 0; 
+
+    return 0; 
+}
+
+int getNextSeqNum(void) {
+    sequenceNum++; 
+    return sequenceNum;
+}
+
+int getSeqNum(void) {
+    return sequenceNum; 
+}
+
+void processRRpacket(uint8_t *RR_packet, int sequenceNumber, struct SR_buffer *window_buffer, int window_size) {
+    /**
+     * Process the RR packet when received and update lower appropriately 
+     */
+
+    uint32_t RR_seq_num_no;
+    memcpy(&RR_seq_num_no, RR_packet + 7, 4);
+
+    //convert to host order seq num
+    uint32_t RR_seq_num = ntohl(RR_seq_num_no);
+    
+    //validate the data packets until RR num
+    while (lower < RR_seq_num) {
+        validateBuffer(window_buffer, lower, window_size);
+        
+        //increment lower until lower = RR_seq_num
+        lower++; 
+    }
+}
+
+void processSREJpacket(uint8_t *SREJ_packet, int socketNum, struct sockaddr_in6 *server, int window_size, struct SR_buffer *window_buffer) {
+    /**
+     * Process the SREJ packet and resend that data
+     */
+
+    int serverAddrLen = sizeof(struct sockaddr_in6); 
+
+    uint32_t SREJ_seq_num_no;
+    memcpy(&SREJ_seq_num_no, SREJ_packet + 7, 4);
+
+    //convert to host order
+    uint32_t SREJ_seq_num = ntohl(SREJ_seq_num_no);
+
+    uint8_t resend_packet[MAX_PDU];
+    int resend_len = 0; 
+
+    getPacketToResend(resend_packet, SREJ_seq_num, &resend_len, window_size, window_buffer);
+
+    safeSendto(socketNum, resend_packet, resend_len, 0, (struct sockaddr *)server, serverAddrLen);
+
+}
+
+int getPacketToResend(uint8_t *resendPDU, int resendSeqNum, int *resend_len, int window_size, struct SR_buffer *window_buffer) {
+    /**
+     * Put the data that needs to be retransmitted in resendPDU 
+     */
+
+    int index = resendSeqNum % window_size; 
+
+    //check the sequence numbres align
+    if (window_buffer[index].sequenceNumber != resendSeqNum) {
+        *resend_len = 0; 
+        return -1; 
+    }
+
+
+    //copy data into resendPDU
+    memcpy(resendPDU, window_buffer[index].buff, window_buffer[index].pduLen);
+    *resend_len = window_buffer[index].pduLen;
+
+    return 0; 
+}
+
+
+void validateBuffer(struct SR_buffer *window_buffer, int seqNum, int window_size) {
+    /**
+     * Set valid flag for the packets that have been RRed
+     */
+
+    int index = seqNum % window_size;     
+
+    if (window_buffer[index].sequenceNumber == seqNum && window_buffer[index].validFlag == 0) {
+        window_buffer[index].validFlag = 1; 
+    }
+
+}
+
+
+
+
+
 
 int formatReceiverReadyPDU(uint8_t *pduBuffer, uint32_t pkt_seqNum, uint32_t RR_seqNum, uint8_t flag, uint8_t *payload, int payloadLen) {
     /**
@@ -37,15 +182,6 @@ int formatReceiverReadyPDU(uint8_t *pduBuffer, uint32_t pkt_seqNum, uint32_t RR_
     return RR_PDU_SIZE; 
 }
 
-int send_data(int file_fd) {
-
-    while (window_open == 1) {
-        window_open = window_open < 
-    }
-
-
-    return 0; 
-}
 
 int createPDU(uint8_t *pduBuffer, uint32_t sequenceNumber, uint8_t flag, uint8_t *payload, int payloadLen) {
    /**
