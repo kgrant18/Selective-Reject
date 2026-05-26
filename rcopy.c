@@ -38,7 +38,9 @@ enum FLAG {
 
 void processFile(char *argv[], int socketNum, int portNumber, struct sockaddr_in6 *server);
 STATE sendSetupPacket(char *argv[], int socketNum, struct sockaddr_in6 *server);
-STATE dataTransfer(int socketNum, struct sockaddr_in6 *server, char *from_file, int window_size, int buffer_size);
+STATE dataTransfer(int socketNum, struct sockaddr_in6 *server, int from_file_fd, int window_size, int buffer_size, struct SR_buffer *window_buffer, int *eof);
+STATE waitOnAck(int socketNum, struct sockaddr_in6 *server, int window_size, struct SR_buffer *window_buffer);
+int processRRorSREJ(int socketNum, struct sockaddr_in6 *server, int window_size, struct SR_buffer *window_buffer);
 void talkToServer(int socketNum, struct sockaddr_in6 * server);
 int readFromStdin(char * buffer);
 int checkArgs(int argc, char * argv[]);
@@ -63,51 +65,9 @@ int main (int argc, char *argv[])
 
 void processFile(char *argv[], int socketNum, int portNumber, struct sockaddr_in6 *server) {
 
-	STATE state = FILENAME; 
+	STATE NS = FILENAME; 
 
-	while (state != DONE) {
-		switch (state) {
-			case FILENAME: {
-				state = sendSetupPacket(argv, socketNum, server);
-				break; 
-			}
-			
-			case FILE_OK: {
-				state = SEND_DATA;
-				break;
-			}
-
-			case SEND_DATA: {
-				char *from_file = argv[1];
-				int window_size = atoi(argv[3]);
-				int buffer_size = atoi(argv[4]);
-				state = dataTransfer(socketNum, server, from_file, window_size, buffer_size);
-				break;
-			}
-
-			case WAIT_ON_ACK: {
-				//do stuff
-				state = DONE; 
-				break; 
-			}
-
-			case DONE: {
-				state = DONE; 
-				break; 
-			}
-
-			default: 
-				state = DONE; 
-		}
-	}
-}
-
-STATE dataTransfer(int socketNum, struct sockaddr_in6 *server, char *from_file, int window_size, int buffer_size) {
-	int serverAddrLen = sizeof(struct sockaddr_in6); 
-
-	struct SR_buffer *window_buffer = initializeWindow(window_size); 
-	int eof = 0;
-
+	char *from_file = argv[1];
 	//if file exists, open
 	int from_file_fd = open(from_file, O_RDONLY);
 	if (from_file_fd == -1) {
@@ -115,8 +75,53 @@ STATE dataTransfer(int socketNum, struct sockaddr_in6 *server, char *from_file, 
 		exit(-1);
 	}
 
+	int window_size = atoi(argv[3]);
+	int buffer_size = atoi(argv[4]);
+	struct SR_buffer *window_buffer = initializeWindow(window_size); 
+	int eof = 0; 
+
+	while (NS != DONE) {
+		switch (NS) {
+			case FILENAME: {
+				NS = sendSetupPacket(argv, socketNum, server);
+				break; 
+			}
+			
+			case FILE_OK: {
+				NS = SEND_DATA;
+				break;
+			}
+
+			case SEND_DATA: {
+				NS = dataTransfer(socketNum, server, from_file_fd, window_size, buffer_size, window_buffer, &eof);
+				break;
+			}
+
+			case WAIT_ON_ACK: {
+				NS = waitOnAck(socketNum, server, window_size, window_buffer);
+				break; 
+			}
+
+			case DONE: {
+				//nothing to be done here, transfer should be complete
+				NS = DONE; 
+				break; 
+			}
+
+			default: 
+				NS = DONE; 
+		}
+	}
+
+	close(from_file_fd);
+	free(window_buffer);
+}
+
+STATE dataTransfer(int socketNum, struct sockaddr_in6 *server, int from_file_fd, int window_size, int buffer_size, struct SR_buffer *window_buffer, int *eof) {
+	int serverAddrLen = sizeof(struct sockaddr_in6); 
+
 	int nextSeqNum = getSeqNum() + 1; 
-	while ((eof == 0) && (checkWindowOpen(nextSeqNum, window_size) == 1)) {
+	while ((*eof == 0) && (checkWindowOpen(nextSeqNum, window_size) == 1)) {
 
 		//read data from disk
         uint8_t disk_buffer[buffer_size];
@@ -125,55 +130,103 @@ STATE dataTransfer(int socketNum, struct sockaddr_in6 *server, char *from_file, 
             perror("read didn't work");
 			close(from_file_fd);
 			free(window_buffer);
-            exit(-1);
+            return DONE;
         }
 
         else if (bytes_read == 0) {
             //reached EOF
-			eof = 1; 
-			break;
+			*eof = 1; 
+			return WAIT_ON_ACK;
         }
 
-		int seqNum = getNextSeqNum(); 
+		//increment API sequence number
+		int cur_seqNum = getNextSeqNum(); 
+		//increment my tracker
+		nextSeqNum = getSeqNum() + 1; 
 
         //create PDU
         uint8_t pduBuffer[MAX_PDU];
-        int pduLen = createWindowPacket(pduBuffer, seqNum, disk_buffer, bytes_read);
+        int pduLen = createWindowPacket(pduBuffer, cur_seqNum, disk_buffer, bytes_read);
 
 		//store in window buffer
-        windowStorePacket(window_buffer, seqNum, pduBuffer, pduLen, window_size);
+        windowStorePacket(window_buffer, cur_seqNum, pduBuffer, pduLen, window_size);
 
         //send data
         safeSendto(socketNum, pduBuffer, pduLen, 0, (struct sockaddr *)server, serverAddrLen);
 
 
-        //check if there's data to process
-		int pollResult = 0; 
-        while ((pollResult = pollCall(0)) > 0) {
-
-			//process RR or SREJ
-			uint8_t received_PDU[MAXBUF];
-			int bytes_recv = safeRecvfrom(socketNum, received_PDU, MAXBUF, 0, (struct sockaddr *)server, &serverAddrLen);
-
-			//check data hasn't been changed
-			unsigned short checksum = in_cksum((unsigned short *)received_PDU, bytes_recv);
-			if (checksum != 0) {
-				fprintf(stderr, "checksum failed\n");
-				return DONE; 
-			}
-
-			//parse data
-			int flag = received_PDU[6];
-			if (flag == RR_PACKET) {
-				processRRpacket(received_PDU, seqNum, window_buffer, window_size);
-			}
-			else if (flag == SREJ_PACKET) {
-				processSREJpacket(received_PDU, socketNum, server, window_size, window_buffer);
-			}
+        //check if there's data to process now (doesn't wait)
+        while (pollCall(0) > 0) {
+			processRRorSREJ(socketNum, server, window_size, window_buffer);
 		}
 	}
 
 	return WAIT_ON_ACK;
+}
+
+STATE waitOnAck(int socketNum, struct sockaddr_in6 *server, int window_size, struct SR_buffer *window_buffer) {
+	/**
+	 * Window is closed and need to wait for acknowledgements before proceeding 
+	 */
+	
+	int serverAddrLen = sizeof(struct sockaddr_in6);
+
+	int pollResult = pollCall(1000); 
+
+	if (pollResult < 0) {
+		perror("pollCall failed");
+		return DONE;
+	}
+
+	if (pollResult == 0) {
+		//timeout = resend lowest packet in window
+		uint8_t resendPDU[MAXBUF];
+		int lower = getLowestPacket();
+
+		int resendLen = getPacketToResend(resendPDU, lower, window_size, window_buffer);
+		if (resendLen > 0) {
+			safeSendto(socketNum, resendPDU, resendLen, 0, (struct sockaddr *)server, serverAddrLen);
+		}
+
+		return WAIT_ON_ACK;
+	}
+
+	else {
+		//process RR/SREJ
+		int returnVal = processRRorSREJ(socketNum, server, window_size, window_buffer);
+		if (returnVal == 0) {
+			return SEND_DATA;
+		}
+		else {
+			return DONE;
+		}
+	}
+}
+
+int processRRorSREJ(int socketNum, struct sockaddr_in6 *server, int window_size, struct SR_buffer *window_buffer) {
+	//process RR or SREJ
+	int serverAddrLen = sizeof(struct sockaddr_in6);
+
+	uint8_t received_PDU[MAXBUF];
+	int bytes_recv = safeRecvfrom(socketNum, received_PDU, MAXBUF, 0, (struct sockaddr *)server, &serverAddrLen);
+
+	//check data hasn't been changed after transfer
+	unsigned short checksum = in_cksum((unsigned short *)received_PDU, bytes_recv);
+	if (checksum != 0) {
+		fprintf(stderr, "checksum failed\n");
+		return -1; 
+	}
+
+	//parse data
+	int flag = received_PDU[6];
+	if (flag == RR_PACKET) {
+		processRRpacket(received_PDU, window_buffer, window_size);
+	}
+	else if (flag == SREJ_PACKET) {
+		processSREJpacket(received_PDU, socketNum, server, window_size, window_buffer);
+	}
+
+	return 0; 
 }
 
 STATE sendSetupPacket(char *argv[], int socketNum, struct sockaddr_in6 *server) {
