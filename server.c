@@ -7,6 +7,7 @@
 #include <string.h>
 #include <sys/types.h>
 #include <sys/socket.h>
+#include <sys/wait.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <fcntl.h>
@@ -15,24 +16,26 @@
 #include "networks.h"
 #include "safeUtil.h"
 #include "checksum.h"
+#include "windowing.h"
+#include "bufferMngment.h"
 
 #define MAXBUF 1407
 
 
 typedef enum State STATE; 
 enum State {
-	ACCEPT_FILENAME, FILE_OK, READ_DISK, DONE
+	ACCEPT_FILENAME, MANAGE_INCOMING_DATA, DONE
 };
 
-enum FLAG {
-	SETUP_PACKET=1, SETUP_RESPONSE=2, DATA_PKT=3, RR_PACKET=5, SREJ_PACKET=6, RCOPY_TO_SERVER=7, SERVER_TO_RCOPY=8
-};
-
-void processFile(int socketNum);
+void processServer(int serverSocketNum);
+void processFile(uint8_t *init_PDU, int init_PDU_len, struct sockaddr_in6 *client);
+STATE manage_incoming_data(int childSocketNum, struct bufferInfo *buffer_struct);
+STATE receive_initial_PDU(int childSocketNum, uint8_t *PDUbuffer, int init_PDU_len, struct sockaddr_in6 *client, struct bufferInfo *buffer_struct);
 int checkArgs(int argc, char *argv[]);
-STATE receive_initial_PDU(int serverSocketNum);
+void sendErrorPacket(int serverSocketNum, struct sockaddr_in6 *client, char *payload);
+void handleZombies(int sig);
 
-int main (int argc, char *argv[])
+int main(int argc, char *argv[])
 { 
 	int serverSocketNum = 0;				
 	int portNumber = 0;
@@ -41,58 +44,124 @@ int main (int argc, char *argv[])
 		
 	serverSocketNum = udpServerSetup(portNumber);
 
-	processFile(serverSocketNum);
+	processServer(serverSocketNum);
 
 	close(serverSocketNum);
 	
 	return 0;
 }
 
-void processFile(int serverSocketNum) {
-	STATE state = ACCEPT_FILENAME;
+void processServer(int serverSocketNum) {
+	/**
+	 * Fork a new child for every client (multiprocessing)
+	*/
+	
+	uint8_t buffer[MAXBUF];
+	struct sockaddr_in6 client;		
+	
+	//cleanup signal handler 
+	signal(SIGCHLD, handleZombies);
+	
+	while (1) {
+		int clientAddrLen = sizeof(struct sockaddr_in6);
 
-	while (state != DONE) {
-		switch (state) {
-			case ACCEPT_FILENAME: 
-				receive_initial_PDU(serverSocketNum);
+		//block waiting for a new client
+		int recv_bytes = safeRecvfrom(serverSocketNum, buffer, MAXBUF, 0, (struct sockaddr *)&client, &clientAddrLen);
+		if (recv_bytes < 0) {
+			perror("safeRecvfrom() failed");
+			continue; 
+		}
 
+		int flag = buffer[6]; 
+		if (flag == EOF_ACK) {
 
 		}
+
+
+		pid_t pid = fork(); 
+		if (pid < 0) {
+			perror("fork failed");
+			exit(-1); 
+		}
+
+		else if (pid == 0) {
+			//child process = new process for each client
+			printf("Child fork() - child pid: %d\n", getpid());
+			processFile(buffer, recv_bytes, &client);
+			exit(0);  
+		}
 	}
-
-
 }
 
-STATE receive_initial_PDU(int serverSocketNum) {
-	int recv_bytes = 0;
-	uint8_t PDUbuffer[MAXBUF];
-	struct sockaddr_in6 client;		
-	int clientAddrLen = sizeof(client);	
-	
-	
-	recv_bytes = safeRecvfrom(serverSocketNum, PDUbuffer, MAXBUF, 0, (struct sockaddr *) &client, &clientAddrLen);
+void processFile(uint8_t *first_PDU, int first_PDU_len, struct sockaddr_in6 *client) {
+	/**
+	 * The logic control and state machine for the server (receiving side) 
+	*/
+
+	//default to accept_filename state
+	STATE NS = ACCEPT_FILENAME; 
+
+	//buffer_struct keeps track of the information that needs to be passed between states
+	struct bufferInfo buffer_struct; 
+
+	//create a new UDP socket for the new client
+	int socketNum = createUdpSocket(); 
+
+	while (NS != DONE) {
+		switch (NS) {
+			case ACCEPT_FILENAME: { 
+				//receive the very first PDU sent from rcopy
+				NS = receive_initial_PDU(socketNum, first_PDU, first_PDU_len, client, &buffer_struct);
+				break;
+			}
+
+			case MANAGE_INCOMING_DATA: {
+				NS = manage_incoming_data(socketNum, &buffer_struct); 
+				break;
+			}
+
+			case DONE: {
+				//file transfer is complete
+				NS = DONE;
+				break;
+			}
+
+			default: {
+				NS = DONE; 
+				break;
+			}
+		}
+	}
+}
+
+STATE receive_initial_PDU(int childSocketNum, uint8_t *PDUbuffer, int PDU_len, struct sockaddr_in6 *client, struct bufferInfo *buffer_struct) {
+	/**
+	 * Receive the very first PDU that contains the window size, buffer size, and from-filename
+	*/
+
+	int clientAddrLen = sizeof(struct sockaddr_in6);
 
 	printf("Received message from client with ");
-	printIPInfo(&client);
-	//printPDU(buffer, recv_bytes);
+	printIPInfo(client);
 
-	//verify checksum
-	unsigned short checksum = in_cksum((unsigned short *)PDUbuffer, recv_bytes);
+	//verify checksum to ensure data hasn't been changed
+	unsigned short checksum = in_cksum((unsigned short *)PDUbuffer, PDU_len);
 	if (checksum != 0) {
-		printf("failed checksum!\n");
+		printf("Checksum failed on first PDU sent\n");
 		return DONE; 
 	}
 
-	//read flag
+	//read flag and confirm it's correct
 	int flag = PDUbuffer[6];
 	if (flag != RCOPY_TO_SERVER) {
-		printf("wrong flag!\n");
+		printf("Incorrect flag received on first PDU sent\n");
 		return DONE; 
 	}
 
 	//parse payload
 	uint8_t *payload = PDUbuffer + 7; 
 	
+	//extract window and buffer sizes
 	uint16_t window_size_no = 0;
 	uint16_t buffer_size_no = 0;
 	memcpy(&window_size_no, payload, 2); 
@@ -100,56 +169,123 @@ STATE receive_initial_PDU(int serverSocketNum) {
 
 	uint16_t window_size = ntohs(window_size_no);
 	uint16_t buffer_size = ntohs(buffer_size_no);
-	
+
+	//populate structure so that it can be used later on
+	buffer_struct->window_size = window_size;
+	buffer_struct->buffer_size = buffer_size;
+	buffer_struct->client = *client;
+
+	//get filename
 	char *filename = (char *)(payload + 4);
-
-
+	
 	//try to open output file
 	int file_fd = open(filename, O_CREAT | O_TRUNC | O_WRONLY, 0600);
 	if (file_fd < 0) {
 		printf("failed to open file\n");
-		return DONE; 
+
+		//send error packet to rcopy if cannot open file
+		char payload[1024];
+		sprintf(payload, "Error on open of output file: %s", filename);
+		sendErrorPacket(childSocketNum, client, payload);
 	}
+
 	else {
 		//server responds to rcopy to acknowledge file has been created
-		uint8_t serverBuffer[MAXBUF];
-		int sequenceNumber = 1; 
+		buffer_struct->file_fd = file_fd; 
 
-		//payload doesn't matter here
-		uint8_t payloadResponse[1]; 
-		payloadResponse[0] = 0; 
+		uint8_t serverResponse[MAXBUF];
+		int sequenceNumber = 0; 
 
-		int pduLen = createPDU(serverBuffer, sequenceNumber, SERVER_TO_RCOPY, payloadResponse, 1);
+		//payload doesn't matter here, only the flag is important
+		uint8_t pyload[1]; 
+		pyload[0] = 0; 
 
-		safeSendto(serverSocketNum, serverBuffer, pduLen, 0, (struct sockaddr *)&client, clientAddrLen);
+		int pduLen = createPDU(serverResponse, sequenceNumber, SERVER_TO_RCOPY, pyload, 1);
 
-
+		safeSendto(childSocketNum, serverResponse, pduLen, 0, (struct sockaddr *)client, clientAddrLen);
 	}
 
+	//go to next state after acknowledging
+	return MANAGE_INCOMING_DATA;
 }
 
+STATE manage_incoming_data(int childSocketNum, struct bufferInfo *buffer_struct) {
+	/**
+	 * This function handles receving the data and writing it to the file
+	*/
 
-void processClient(int socketNum)
-{
-	int dataLen = 0; 
-	char buffer[MAXBUF + 1];	  
-	struct sockaddr_in6 client;		
-	int clientAddrLen = sizeof(client);	
+	//need to keep track of another struct so that state, expected, and buffer persist across multiple sent packets
+	struct serverStateData manager;
+
+	//default values and buffer initialization 
+	manager.state = INORDER;
+	manager.expectedSeqNum = 1; 
+	manager.eofSeqNum = -1; 
+	manager.buffer = initializeBuffer(buffer_struct->window_size);
 	
-	buffer[0] = '\0';
-	while (buffer[0] != '.')
-	{
-		dataLen = safeRecvfrom(socketNum, buffer, MAXBUF, 0, (struct sockaddr *) &client, &clientAddrLen);
+	while (1) { 
+		uint8_t PDU[MAXBUF];
+
+		struct sockaddr_in6 client; 
+		int clientAddrLen = sizeof(struct sockaddr_in6);
+
+		//block until server receives a packet
+		int recv_bytes = safeRecvfrom(childSocketNum, PDU, MAXBUF, 0, (struct sockaddr *)&client, &clientAddrLen);
+		if (recv_bytes < 0) {
+			perror("safeRecvfrom failed");
+			continue; 
+		}
+
+		//check if data has been changed
+		unsigned short checksum = in_cksum((unsigned short *)PDU, recv_bytes);
+		if (checksum != 0) {
+			printf("Bad checksum\n");
+			continue; 
+		}
+
+		//get sequence number
+		uint32_t seqNum_no = 0;
+		memcpy(&seqNum_no, PDU, 4);
+
+		//data needed for managing the buffer
+		uint32_t seqNum = ntohl(seqNum_no);
+		uint8_t *payload = PDU + 7; 
+		int payloadLen = recv_bytes - 7; 
+
+		//check that it's a data flag, otherwise don't proceed
+		uint8_t flag = PDU[6]; 
+		if (flag != DATA_PKT) {
+			continue; 
+		}
+		else if (flag == EOF_ACK) {
+			//set the EOF sequence number
+			manager.eofSeqNum = seqNum; 
+		}
 	
-		printf("Received message from client with ");
-		printIPInfo(&client);
-		printf(" Len: %d \'%s\'\n", dataLen, buffer);
-
-		// just for fun send back to client number of bytes received
-		sprintf(buffer, "bytes: %d", dataLen);
-		safeSendto(socketNum, buffer, strlen(buffer)+1, 0, (struct sockaddr *) & client, clientAddrLen);
-
+		//call buffer management function
+		bufferManagement(childSocketNum, seqNum, payload, payloadLen, buffer_struct, &manager); 
+		if (manager.state == BUFFER_DONE) {
+			break;
+		}
 	}
+
+	free(manager.buffer);
+	
+	return DONE; 
+}
+
+void sendErrorPacket(int serverSocketNum, struct sockaddr_in6 *client, char *payload) {
+	/**
+	 * Function to send an error packet back to rcopy
+	 */
+	
+	int clientAddrLen = sizeof(struct sockaddr_in6);
+
+	uint8_t PDU_buffer[MAXBUF];
+
+	int pduLen = createPDU(PDU_buffer, 0, ERR_FLAG, (uint8_t *)payload, strlen(payload) + 1);
+
+	safeSendto(serverSocketNum, PDU_buffer, pduLen, 0, (struct sockaddr *)&client, clientAddrLen);
 }
 
 int checkArgs(int argc, char *argv[])

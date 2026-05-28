@@ -20,7 +20,7 @@
 #include "safeUtil.h"
 #include "pollLib.h"
 #include "windowing.h"
-#include "buffering.h"
+#include "bufferMngment.h"
 #include "checksum.h"
 
 #define MAXBUF 1407
@@ -32,9 +32,9 @@ enum State {
 	FILENAME, FILE_OK, SEND_DATA, WAIT_ON_ACK, DONE
 };
 
-enum FLAG {
-	SETUP_PACKET=1, SETUP_RESPONSE=2, DATA_PKT=3, RR_PACKET=5, SREJ_PACKET=6, RCOPY_TO_SERVER=7, SERVER_TO_RCOPY=8
-};
+// enum FLAG {
+// 	SETUP_PACKET=1, SETUP_RESPONSE=2, DATA_PKT=3, RR_PACKET=5, SREJ_PACKET=6, RCOPY_TO_SERVER=7, SERVER_TO_RCOPY=8
+// };
 
 void processFile(char *argv[], int socketNum, int portNumber, struct sockaddr_in6 *server);
 STATE sendSetupPacket(char *argv[], int socketNum, struct sockaddr_in6 *server);
@@ -77,7 +77,7 @@ void processFile(char *argv[], int socketNum, int portNumber, struct sockaddr_in
 
 	int window_size = atoi(argv[3]);
 	int buffer_size = atoi(argv[4]);
-	struct SR_buffer *window_buffer = initializeWindow(window_size); 
+	struct SR_buffer *window_buffer = initializeBuffer(window_size); 
 	int eof = 0; 
 
 	while (NS != DONE) {
@@ -145,7 +145,7 @@ STATE dataTransfer(int socketNum, struct sockaddr_in6 *server, int from_file_fd,
 		nextSeqNum = getSeqNum() + 1; 
 
         //create PDU
-        uint8_t pduBuffer[MAX_PDU];
+        uint8_t pduBuffer[MAXBUF];
         int pduLen = createWindowPacket(pduBuffer, cur_seqNum, disk_buffer, bytes_read);
 
 		//store in window buffer
@@ -302,23 +302,6 @@ STATE sendSetupPacket(char *argv[], int socketNum, struct sockaddr_in6 *server) 
 
 }
 
-
-// STATE setup_state(char *argv[], int portNumber, struct sockaddr_in6 server) {
-// 	struct sockaddr_in6 server; 
-// 	char *hostname = argv[6];
-// 	int socketNum = 0;
-// 	STATE returnState = FILENAME; 
-
-// 	socketNum = setupUdpClientToServer(&server, hostname, portNumber);
-
-// 	if (socketNum < 0) {
-// 		//could not connect to server
-// 		returnState = DONE; 
-// 	}
-
-// 	return returnState; 
-	
-// }
 
 
 

@@ -1,0 +1,4 @@
+Kevin Grant (kgrant11) Lab section: 12pm
+
+- I use flag=32 for sending error packets
+- I use flag=33 for EOF acknowledgement 

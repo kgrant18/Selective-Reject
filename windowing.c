@@ -9,32 +9,14 @@
 #include "windowing.h"
 #include "pollLib.h"
 #include "safeUtil.h"
-#include "buffering.h"
+#include "bufferMngment.h"
 
-#define RR_PDU_SIZE 11
-#define MAX_PDU 1407
+#define MAXBUF 1407
 
 static int lower = 0;
 static int sequenceNum = 0; 
 
-struct SR_buffer *initializeWindow(int window_size) {
 
-    struct SR_buffer *buffer = malloc(window_size * sizeof(struct SR_buffer));
-    if (buffer == NULL) {
-        perror("malloc failed");
-        exit(-1);
-    }
-
-    //initialize values to default
-    int i = 0; 
-    for (i = 0; i < window_size; i++) {
-        buffer[i].pduLen = 0; 
-        buffer[i].sequenceNumber = 0; 
-        buffer[i].validFlag = 0; 
-    }
-
-    return buffer;
-}
 
 int checkWindowOpen(int nextSeqNum, int window_size) {
     int window_open = 0; 
@@ -77,7 +59,7 @@ int getSeqNum(void) {
     return sequenceNum; 
 }
 
-void processRRpacket(uint8_t *RR_packet, int sequenceNumber, struct SR_buffer *window_buffer, int window_size) {
+void processRRpacket(uint8_t *RR_packet, struct SR_buffer *window_buffer, int window_size) {
     /**
      * Process the RR packet when received and update lower appropriately 
      */
@@ -110,16 +92,15 @@ void processSREJpacket(uint8_t *SREJ_packet, int socketNum, struct sockaddr_in6 
     //convert to host order
     uint32_t SREJ_seq_num = ntohl(SREJ_seq_num_no);
 
-    uint8_t resend_packet[MAX_PDU];
-    int resend_len = 0; 
+    uint8_t resend_packet[MAXBUF];
 
-    getPacketToResend(resend_packet, SREJ_seq_num, &resend_len, window_size, window_buffer);
+    int resend_len = getPacketToResend(resend_packet, SREJ_seq_num, window_size, window_buffer);
 
     safeSendto(socketNum, resend_packet, resend_len, 0, (struct sockaddr *)server, serverAddrLen);
 
 }
 
-int getPacketToResend(uint8_t *resendPDU, int resendSeqNum, int *resend_len, int window_size, struct SR_buffer *window_buffer) {
+int getPacketToResend(uint8_t *resendPDU, int resendSeqNum, int window_size, struct SR_buffer *window_buffer) {
     /**
      * Put the data that needs to be retransmitted in resendPDU 
      */
@@ -128,16 +109,14 @@ int getPacketToResend(uint8_t *resendPDU, int resendSeqNum, int *resend_len, int
 
     //check the sequence numbres align
     if (window_buffer[index].sequenceNumber != resendSeqNum) {
-        *resend_len = 0; 
         return -1; 
     }
 
 
     //copy data into resendPDU
     memcpy(resendPDU, window_buffer[index].buff, window_buffer[index].pduLen);
-    *resend_len = window_buffer[index].pduLen;
 
-    return 0; 
+    return window_buffer[index].pduLen;
 }
 
 
@@ -154,33 +133,10 @@ void validateBuffer(struct SR_buffer *window_buffer, int seqNum, int window_size
 
 }
 
-
-
-
-
-
-int formatReceiverReadyPDU(uint8_t *pduBuffer, uint32_t pkt_seqNum, uint32_t RR_seqNum, uint8_t flag, uint8_t *payload, int payloadLen) {
-    /**
-     * Format: Packet seq num, checksum, flag, RR seq number
-     */
-    
-    uint32_t seqNum_no = htonl(pkt_seqNum);
-    memcpy(pduBuffer, &seqNum_no, 4);
-
-    memcpy(pduBuffer + 6, &flag, 1);
-
-    uint32_t RR_seqNum_no = htonl(RR_seqNum); 
-    memcpy(pduBuffer + 7, &RR_seqNum_no, 4);
-
-    //set checksum to 0s initially
-    memset(pduBuffer + 4, 0, 2);
-    //run checksum function
-    unsigned short cksum = in_cksum((unsigned short *)pduBuffer, RR_PDU_SIZE);
-    //now add to PDU
-    memcpy(pduBuffer + 4, &cksum, 2);
-
-    return RR_PDU_SIZE; 
+int getLowestPacket(void) {
+    return lower; 
 }
+
 
 
 int createPDU(uint8_t *pduBuffer, uint32_t sequenceNumber, uint8_t flag, uint8_t *payload, int payloadLen) {
