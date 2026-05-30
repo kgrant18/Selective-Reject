@@ -21,7 +21,16 @@ typedef enum receiverState {
 } receiverState;
 
 enum FLAG {
-	SETUP_PACKET=1, SETUP_RESPONSE=2, DATA_PKT=3, RR_PACKET=5, SREJ_PACKET=6, RCOPY_TO_SERVER=7, SERVER_TO_RCOPY=8, ERR_FLAG = 32, EOF_ACK=33
+	SETUP_PACKET = 1, 
+	SETUP_RESPONSE = 2, 
+	DATA_PKT = 3, 
+	RR_PACKET = 5, 
+	SREJ_PACKET = 6, 
+	RCOPY_TO_SERVER = 7, 
+	SERVER_TO_RCOPY = 8, 
+	ERR_FLAG = 32, 
+	EOF_FLAG = 33,
+	EOF_ACK = 34
 };
 
 struct SR_buffer {
@@ -46,14 +55,15 @@ struct serverStateData {
 };
 
 struct SR_buffer *initializeBuffer(int window_size);
-void bufferManagement(int childSocketNum, int seqNum, uint8_t *payload, int payloadLen, struct bufferInfo *buffer_struct, struct receiverManager *manager);
-receiverState inorderFunction(int *expectedSeqNum, int actualSeqNum, uint8_t *payload, int payloadLen, struct bufferInfo *buffer_struct, int childSocketNum, struct SR_buffer *buffer, int eofSeqNum);
-receiverState bufferingFunction(int *expectedSeqNum, int actualSeqNum, uint8_t *payload, int payloadLen, struct bufferInfo *buffer_struct, int childSocketNum, struct SR_buffer *buffer);
-receiverState flushingFunction(int *expectedSeqNum, struct bufferInfo *buffer_struct, int childSocketNum, struct SR_buffer *buffer);
+void bufferManagement(int childSocketNum, int seqNum, int flag, uint8_t *payload, int payloadLen, struct bufferInfo *buffer_struct, struct serverStateData *manager);
+receiverState inorderFunction(int *expectedSeqNum, int actualSeqNum, int flag, uint8_t *payload, int payloadLen, struct bufferInfo *buffer_struct, int childSocketNum, struct SR_buffer *buffer, int eofSeqNum);
+receiverState bufferingFunction(int *expectedSeqNum, int actualSeqNum, int flag, uint8_t *payload, int payloadLen, struct bufferInfo *buffer_struct, int childSocketNum, struct SR_buffer *buffer, int eofSeqNum);
+receiverState flushingFunction(int *expectedSeqNum, struct bufferInfo *buffer_struct, int childSocketNum, struct SR_buffer *buffer, int eofSeqNum);
 int checkIfBuffered(int seqNum, int window_size, struct SR_buffer *buffer);
 void sendRR(int childSocketNum, int RR_seqNum, struct bufferInfo *buffer_struct);
 void sendSREJ(int childSocketNum, int SREJ_seqNum, struct bufferInfo *buffer_struct);
 void storePacketInBuffer(struct SR_buffer *buffer, int seqNum, uint8_t *payload, int payloadLen, int window_size);
 int formatReceiverReadyPDU(uint8_t *pduBuffer, uint32_t pkt_seqNum, uint32_t RR_seqNum, uint8_t flag);
+void sendEOFAck(int childSocketNum, int eofSeqNum, struct bufferInfo *buffer_struct);
 
 #endif

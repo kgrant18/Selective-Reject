@@ -3,20 +3,23 @@
 
 #include <stdio.h>
 #include <stdlib.h>
-#include <unistd.h>
-#include <string.h>
 #include <sys/types.h>
-#include <sys/socket.h>
-#include <sys/wait.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
+#include <sys/stat.h>
+#include <sys/uio.h>
+#include <sys/time.h>
+#include <unistd.h>
 #include <fcntl.h>
+#include <string.h>
+#include <strings.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <netdb.h>
 
 #include "bufferMngment.h"
 
 int checkWindowOpen(int nextSeqNum, int window_size);
 int createWindowPacket(uint8_t *packetBuffer, int sn, uint8_t *payload, int payloadLen);
-int windowStorePacket(struct SR_buffer *window_buffer, int sn, uint8_t *pdu, int pduLen, int window_size);
+void windowStorePacket(struct SR_buffer *window_buffer, int sn, uint8_t *pdu, int pduLen, int window_size);
 int getNextSeqNum(void);
 int getSeqNum(void);
 void processRRpacket(uint8_t *RR_packet, struct SR_buffer *window_buffer, int window_size);

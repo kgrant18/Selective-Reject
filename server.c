@@ -18,6 +18,7 @@
 #include "checksum.h"
 #include "windowing.h"
 #include "bufferMngment.h"
+#include "cpe464.h"
 
 #define MAXBUF 1407
 
@@ -41,6 +42,9 @@ int main(int argc, char *argv[])
 	int portNumber = 0;
 
 	portNumber = checkArgs(argc, argv);
+	
+	double err_rate = atof(argv[1]);
+	sendErr_init(err_rate, DROP_ON, FLIP_ON, DEBUG_ON, RSEED_OFF);
 		
 	serverSocketNum = udpServerSetup(portNumber);
 
@@ -71,12 +75,6 @@ void processServer(int serverSocketNum) {
 			perror("safeRecvfrom() failed");
 			continue; 
 		}
-
-		int flag = buffer[6]; 
-		if (flag == EOF_ACK) {
-
-		}
-
 
 		pid_t pid = fork(); 
 		if (pid < 0) {
@@ -215,13 +213,13 @@ STATE manage_incoming_data(int childSocketNum, struct bufferInfo *buffer_struct)
 	*/
 
 	//need to keep track of another struct so that state, expected, and buffer persist across multiple sent packets
-	struct serverStateData manager;
+	struct serverStateData tracker;
 
 	//default values and buffer initialization 
-	manager.state = INORDER;
-	manager.expectedSeqNum = 1; 
-	manager.eofSeqNum = -1; 
-	manager.buffer = initializeBuffer(buffer_struct->window_size);
+	tracker.state = INORDER;
+	tracker.expectedSeqNum = 1; 
+	tracker.eofSeqNum = -1; 
+	tracker.buffer = initializeBuffer(buffer_struct->window_size);
 	
 	while (1) { 
 		uint8_t PDU[MAXBUF];
@@ -240,6 +238,7 @@ STATE manage_incoming_data(int childSocketNum, struct bufferInfo *buffer_struct)
 		unsigned short checksum = in_cksum((unsigned short *)PDU, recv_bytes);
 		if (checksum != 0) {
 			printf("Bad checksum\n");
+			sendSREJ(childSocketNum, tracker.expectedSeqNum, buffer_struct);
 			continue; 
 		}
 
@@ -252,24 +251,26 @@ STATE manage_incoming_data(int childSocketNum, struct bufferInfo *buffer_struct)
 		uint8_t *payload = PDU + 7; 
 		int payloadLen = recv_bytes - 7; 
 
-		//check that it's a data flag, otherwise don't proceed
+		//check if EOF flag was sent
 		uint8_t flag = PDU[6]; 
-		if (flag != DATA_PKT) {
+		if (flag == EOF_FLAG) {
+			//set seqNum of last packet sent
+			tracker.eofSeqNum = seqNum; 
+		}
+		
+		//if not a data flag, don't proceed
+		else if (flag != DATA_PKT) {
 			continue; 
 		}
-		else if (flag == EOF_ACK) {
-			//set the EOF sequence number
-			manager.eofSeqNum = seqNum; 
-		}
-	
+
 		//call buffer management function
-		bufferManagement(childSocketNum, seqNum, payload, payloadLen, buffer_struct, &manager); 
-		if (manager.state == BUFFER_DONE) {
+		bufferManagement(childSocketNum, seqNum, flag, payload, payloadLen, buffer_struct, &tracker); 
+		if (tracker.state == BUFFER_DONE) {
 			break;
 		}
 	}
 
-	free(manager.buffer);
+	free(tracker.buffer);
 	
 	return DONE; 
 }

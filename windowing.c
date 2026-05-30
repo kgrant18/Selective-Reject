@@ -13,12 +13,14 @@
 
 #define MAXBUF 1407
 
-static int lower = 0;
+static int lower = 1;
 static int sequenceNum = 0; 
 
-
-
 int checkWindowOpen(int nextSeqNum, int window_size) {
+    /**
+     * Returns 1 if the window is open and 0 if it is closed  
+    */
+
     int window_open = 0; 
     int upper = lower + window_size;
 
@@ -31,23 +33,29 @@ int checkWindowOpen(int nextSeqNum, int window_size) {
 }
 
 int createWindowPacket(uint8_t *packetBuffer, int sn, uint8_t *payload, int payloadLen) {
+    /**
+     * Format the PDU to be sent in the window 
+    */
+    
     int pduLen = 0;
-    int flag = 3;
+    int flag = DATA_PKT;
     
     pduLen = createPDU(packetBuffer, sn, flag, payload, payloadLen);    
 
     return pduLen;
 }
 
-int windowStorePacket(struct SR_buffer *window_buffer, int sn, uint8_t *pdu, int pduLen, int window_size) {
+void windowStorePacket(struct SR_buffer *window_buffer, int sn, uint8_t *pdu, int pduLen, int window_size) {
+    /** 
+     * Stores the packet in the windowing buffer
+    */
+    
     int index = sn % window_size;
 
     memcpy(window_buffer[index].buff, pdu, pduLen);
     window_buffer[index].pduLen = pduLen;
     window_buffer[index].sequenceNumber = sn;
-    window_buffer[index].validFlag = 0; 
-
-    return 0; 
+    window_buffer[index].validFlag = 0;  
 }
 
 int getNextSeqNum(void) {
@@ -95,14 +103,14 @@ void processSREJpacket(uint8_t *SREJ_packet, int socketNum, struct sockaddr_in6 
     uint8_t resend_packet[MAXBUF];
 
     int resend_len = getPacketToResend(resend_packet, SREJ_seq_num, window_size, window_buffer);
-
-    safeSendto(socketNum, resend_packet, resend_len, 0, (struct sockaddr *)server, serverAddrLen);
-
+    if (resend_len > 0) {
+        safeSendto(socketNum, resend_packet, resend_len, 0, (struct sockaddr *)server, serverAddrLen);
+    }
 }
 
 int getPacketToResend(uint8_t *resendPDU, int resendSeqNum, int window_size, struct SR_buffer *window_buffer) {
     /**
-     * Put the data that needs to be retransmitted in resendPDU 
+     * Get the packet that needs to be retransmitted from the buffer 
      */
 
     int index = resendSeqNum % window_size; 
@@ -111,7 +119,6 @@ int getPacketToResend(uint8_t *resendPDU, int resendSeqNum, int window_size, str
     if (window_buffer[index].sequenceNumber != resendSeqNum) {
         return -1; 
     }
-
 
     //copy data into resendPDU
     memcpy(resendPDU, window_buffer[index].buff, window_buffer[index].pduLen);
@@ -130,13 +137,11 @@ void validateBuffer(struct SR_buffer *window_buffer, int seqNum, int window_size
     if (window_buffer[index].sequenceNumber == seqNum && window_buffer[index].validFlag == 0) {
         window_buffer[index].validFlag = 1; 
     }
-
 }
 
 int getLowestPacket(void) {
     return lower; 
 }
-
 
 
 int createPDU(uint8_t *pduBuffer, uint32_t sequenceNumber, uint8_t flag, uint8_t *payload, int payloadLen) {

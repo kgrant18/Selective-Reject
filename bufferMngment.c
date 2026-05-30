@@ -26,65 +26,67 @@ struct SR_buffer *initializeBuffer(int window_size) {
     return buffer;
 }
 
-void bufferManagement(int childSocketNum, int seqNum, uint8_t *payload, int payloadLen, struct bufferInfo *buffer_struct, struct receiverManager *manager) {
+void bufferManagement(int childSocketNum, int seqNum, int flag, uint8_t *payload, int payloadLen, struct bufferInfo *buffer_struct, struct serverStateData *tracker) {
     /**
      * The main control and state machine for buffering on the receiving (server) side
     */
 
-    switch (manager->state) {
+    switch (tracker->state) {
         case INORDER: {
-            manager->state = inorderFunction(&manager->expectedSeqNum, seqNum, payload, payloadLen, buffer_struct, childSocketNum, manager->buffer, manager->eofSeqNum); 
+            tracker->state = inorderFunction(&tracker->expectedSeqNum, seqNum, flag, payload, payloadLen, buffer_struct, childSocketNum, tracker->buffer, tracker->eofSeqNum); 
             break;
         }
 
         case BUFFERING: {
-            manager->state = bufferingFunction(&manager->expectedSeqNum, seqNum, payload, payloadLen, buffer_struct, childSocketNum, manager->buffer);
+            tracker->state = bufferingFunction(&tracker->expectedSeqNum, seqNum, flag, payload, payloadLen, buffer_struct, childSocketNum, tracker->buffer, tracker->eofSeqNum);
             break;
         }
 
         case FLUSHING: {
-            manager->state = flushingFunction(&manager->expectedSeqNum, buffer_struct, childSocketNum, manager->buffer);
+            tracker->state = flushingFunction(&tracker->expectedSeqNum, buffer_struct, childSocketNum, tracker->buffer, tracker->eofSeqNum);
             break; 
         }
 
         case BUFFER_DONE: {
-            manager->state = BUFFER_DONE; 
+            printf("file transfer complete. Sitting in BUFFER_DONE state\n"); 
             break;
         }
 
         default: {
-            manager->state = BUFFER_DONE; 
+            tracker->state = BUFFER_DONE; 
         }
 
     }
 }
 
-receiverState inorderFunction(int *expectedSeqNum, int actualSeqNum, uint8_t *payload, int payloadLen, struct bufferInfo *buffer_struct, int childSocketNum, struct SR_buffer *buffer, int eofSeqNum) {
+receiverState inorderFunction(int *expectedSeqNum, int actualSeqNum, int flag, uint8_t *payload, int payloadLen, struct bufferInfo *buffer_struct, int childSocketNum, struct SR_buffer *buffer, int eofSeqNum) {
     /**
      * Determine if data is received in order and procceed as necessary
     */
     
     if (actualSeqNum == *expectedSeqNum) {
-        //if expected, we can write to file and procceed
-        int to_fd = buffer_struct->file_fd;
+        if (flag == DATA_PKT) {
+            //if expected, we can write to file and procceed
+            int to_fd = buffer_struct->file_fd;
 
-        //write data to file
-        ssize_t w_bytes = write(to_fd, payload, payloadLen);
-        if (w_bytes < 0) {
-            perror("write failed");
-            return BUFFER_DONE; 
+            //write data to file
+            ssize_t w_bytes = write(to_fd, payload, payloadLen);
+            if (w_bytes < 0) {
+                perror("write failed");
+                return BUFFER_DONE; 
+            }
+
+            //clear slot in buffer after writing to file
+            int index = actualSeqNum % buffer_struct->window_size;
+            buffer[index].validFlag = 0;
         }
-
-        //clear slot in buffer after writing to file
-        int index = actualSeqNum % buffer_struct->window_size;
-        buffer[index].validFlag = 0; 
-
+         
         //increment expected to next sequence number
         (*expectedSeqNum)++; 
 
         //check if we've reached EOF 
-        if (*expectedSeqNum > eofSeqNum) {
-            sendEOFAck(int childSocketNum, *expectedSeqNum, buffer_struct);
+        if (flag == EOF_FLAG) {
+            sendEOFAck(childSocketNum, eofSeqNum, buffer_struct);
             return BUFFER_DONE; 
         }
 
@@ -113,27 +115,29 @@ receiverState inorderFunction(int *expectedSeqNum, int actualSeqNum, uint8_t *pa
     }
 }
 
-receiverState bufferingFunction(int *expectedSeqNum, int actualSeqNum, uint8_t *payload, int payloadLen, struct bufferInfo *buffer_struct, int childSocketNum, struct SR_buffer *buffer) {
+receiverState bufferingFunction(int *expectedSeqNum, int actualSeqNum, int flag, uint8_t *payload, int payloadLen, struct bufferInfo *buffer_struct, int childSocketNum, struct SR_buffer *buffer, int eofSeqNum) {
 
     if (actualSeqNum == *expectedSeqNum) {
-        //the missing packet arrives 
-        int to_fd = buffer_struct->file_fd; 
-        ssize_t w_bytes = write(to_fd, payload, payloadLen);
-        if (w_bytes < 0) {
-            perror("write failed");
-            return BUFFER_DONE; 
+        if (flag == DATA_PKT) {
+            //the missing packet arrives 
+            int to_fd = buffer_struct->file_fd; 
+            ssize_t w_bytes = write(to_fd, payload, payloadLen);
+            if (w_bytes < 0) {
+                perror("write failed");
+                return BUFFER_DONE; 
+            }
+
+            //clear slot in buffer after writing to file
+            int index = actualSeqNum % buffer_struct->window_size;
+            buffer[index].validFlag = 0; 
         }
-
-        //clear slot in buffer after writing to file
-        int index = actualSeqNum % buffer_struct->window_size;
-        buffer[index].validFlag = 0; 
-
+        
         //increment expected
         (*expectedSeqNum)++; 
 
         //check if we've reached EOF 
-        if (*expectedSeqNum > eofSeqNum) {
-            sendEOFAck(childSocketNum, *expectedSeqNum, buffer_struct);
+        if (flag == EOF_FLAG) {
+            sendEOFAck(childSocketNum, eofSeqNum, buffer_struct);
             return BUFFER_DONE; 
         }
 
@@ -158,7 +162,7 @@ receiverState bufferingFunction(int *expectedSeqNum, int actualSeqNum, uint8_t *
     }
 }
 
-receiverState flushingFunction(int *expectedSeqNum, struct bufferInfo *buffer_struct, int childSocketNum, struct SR_buffer *buffer) {
+receiverState flushingFunction(int *expectedSeqNum, struct bufferInfo *buffer_struct, int childSocketNum, struct SR_buffer *buffer, int eofSeqNum) {
     /**
      * if the expected packet is already buffered: write to file and send RR
     */
@@ -182,13 +186,19 @@ receiverState flushingFunction(int *expectedSeqNum, struct bufferInfo *buffer_st
         (*expectedSeqNum)++; 
     }
 
+    //check for EOF
+    if ((*expectedSeqNum == eofSeqNum + 1) && (eofSeqNum != -1)) {
+        sendEOFAck(childSocketNum, eofSeqNum, buffer_struct);
+        return BUFFER_DONE;
+    }
+
     //send single RR after writing everything that's been buffered
     sendRR(childSocketNum, *expectedSeqNum, buffer_struct);
 
     return INORDER; 
 }
 
-void sendEOFAck(int childSocketNum, int *expectedSeqNum, struct bufferInfo *buffer_struct) {
+void sendEOFAck(int childSocketNum, int eofSeqNum, struct bufferInfo *buffer_struct) {
     /**
      * Last ACK sent once EOF is reached 
     */
@@ -197,12 +207,12 @@ void sendEOFAck(int childSocketNum, int *expectedSeqNum, struct bufferInfo *buff
 
     uint8_t PDU[MAXBUF];
 
-    //payload doesn't matter
+    //payload doesn't matter for this packet
     uint8_t payload[1];
-    memcpy(payload, 0, 1);
+    payload[0] = 0; 
 
     //create EOF PDU
-    int num_bytes = createPDU(PDU, *expectedSeqNum, flag, payload);
+    int num_bytes = createPDU(PDU, eofSeqNum, flag, payload, 1);
 
     //send to rcopy
     struct sockaddr_in6 client = buffer_struct->client;
