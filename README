@@ -1,5 +1,6 @@
 Kevin Grant (kgrant11) Lab section: 12pm
 
 - I use flag=32 for sending error packets
-- I use flag=35 for the EOF packet (last one sent)
-- I use flag=34 for EOF acknowledgement 
+- I use flag=33 for the EOF packet (last one sent)
+- I use flag=34 for EOF acknowledgement (signifies the end of the file transfer)
+
