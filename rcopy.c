@@ -95,6 +95,7 @@ void processFile(char *argv[], int socketNum, int portNumber, struct sockaddr_in
 	int counter = 0; 
 	int eofSeqNum = 0; 
 
+	//FSM
 	while (NS != DONE) {
 		switch (NS) {
 			case FILENAME: {
@@ -172,12 +173,7 @@ STATE sendSetupPacket(char *argv[], int socketNum, struct sockaddr_in6 *server) 
 		int pollSocket = pollCall(1000); 
 
 		if (pollSocket < 0) {
-			perror("poll call failed");
-			return DONE; 
-		}
-		
-		else if (pollSocket == 0) {
-			//timeout... resend filename packet
+			//timeout = resend filename packet
 			counter++; 
 			continue; 
 		}
@@ -282,8 +278,8 @@ STATE waitOnAck(int socketNum, struct sockaddr_in6 *server, int window_size, str
 
 	int pollResult = pollCall(1000); 
 
-	if (pollResult < 0) {
-		//keep resending
+	if (pollResult < 0 && *counter < 10) {
+		//keep resending packet on timeout
 		uint8_t resendPDU[MAXBUF];
 		int lower = getLowestPacket(); 
 		
@@ -297,22 +293,7 @@ STATE waitOnAck(int socketNum, struct sockaddr_in6 *server, int window_size, str
 		return WAIT_ON_ACK;
 	}
 
-	if (pollResult == 0 && *counter < 10) {
-		//timeout = resend lowest packet in window
-		uint8_t resendPDU[MAXBUF];
-		int lower = getLowestPacket();
-
-		//get the packet to be resent from the buffer
-		int resendLen = getPacketToResend(resendPDU, lower, window_size, window_buffer);
-		if (resendLen > 0) {
-			safeSendto(socketNum, resendPDU, resendLen, 0, (struct sockaddr *)server, serverAddrLen);
-		}
-
-		(*counter)++; 
-		return WAIT_ON_ACK;
-	}
-
-	else if (pollResult == 0 && *counter >= 10) {
+	else if (*counter >= 10) {
 		//assume the other side closed after 10 tries
 		return DONE; 
 	}
@@ -358,21 +339,19 @@ STATE waitOnEOFAck(int socketNum, struct sockaddr_in6 *server, int sequenceNum, 
 	int counter = 0; 
 	int serverAddrLen = sizeof(struct sockaddr_in6);
 
-	while (counter < 10) {
-		//send last PDU
-		sendEOFPacket(socketNum, server, sequenceNum);
+	//send last PDU
+	sendEOFPacket(socketNum, server, sequenceNum);
 
+	while (counter < 10) {
 		//poll for one second 
 		int pollResult = pollCall(1000);
 
 		if (pollResult < 0) {
-			perror("pollCall failed");
-			exit(-1);
-		}
+			// resending EOF ack on timeout for up to 10 times
+			sendEOFPacket(socketNum, server, sequenceNum);
 
-		else if (pollResult == 0) {
-			//did not receive anything
 			counter++; 
+			continue;
 		}
 
 		else {
@@ -381,15 +360,13 @@ STATE waitOnEOFAck(int socketNum, struct sockaddr_in6 *server, int sequenceNum, 
 			int bytes_recv = safeRecvfrom(socketNum, EOF_buffer, MAXBUF, 0, (struct sockaddr *)server, &serverAddrLen);
 
 			if (bytes_recv < 0) {
-				counter++; 
 				continue; 
 			}
 
 			//check checksum for any data corruption
 			unsigned short checksum = in_cksum((unsigned short *)EOF_buffer, bytes_recv);
 			if (checksum != 0) {
-				printf("checksum failed waiting on EOF ack");
-				counter++;
+				printf("checksum failed waiting on EOF ack\n");
 				continue; 
 			}
 
@@ -402,18 +379,13 @@ STATE waitOnEOFAck(int socketNum, struct sockaddr_in6 *server, int sequenceNum, 
 
 			else if (flag == RR_PACKET) {
 				processRRpacket(EOF_buffer, window_buffer, window_size);
-				counter = 0; 
+				sendEOFPacket(socketNum, server, sequenceNum);
 				continue;
 			}
 			
 			else if (flag == SREJ_PACKET) {
 				processSREJpacket(EOF_buffer, socketNum, server, window_size, window_buffer);
-				counter = 0;
-				continue;
-			}
-
-			else {
-				counter++;
+				sendEOFPacket(socketNum, server, sequenceNum);
 				continue;
 			}
 		}
@@ -443,7 +415,9 @@ void sendEOFPacket(int socketNum, struct sockaddr_in6 *server, int sequenceNum) 
 }
 
 int processRRorSREJ(int socketNum, struct sockaddr_in6 *server, int window_size, struct SR_buffer *window_buffer) {
-	//process RR or SREJ
+	/**
+	 * Process either a RR or SREJ packet 
+	*/
 	int serverAddrLen = sizeof(struct sockaddr_in6);
 
 	//receive the packet

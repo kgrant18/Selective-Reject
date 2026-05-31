@@ -19,6 +19,7 @@
 #include "windowing.h"
 #include "bufferMngment.h"
 #include "cpe464.h"
+#include "pollLib.h"
 
 #define MAXBUF 1407
 
@@ -220,6 +221,10 @@ STATE manage_incoming_data(int childSocketNum, struct bufferInfo *buffer_struct)
 	tracker.expectedSeqNum = 1; 
 	tracker.eofSeqNum = -1; 
 	tracker.buffer = initializeBuffer(buffer_struct->window_size);
+
+	//add socketNum to pollSet!! finally
+	setupPollSet();
+	addToPollSet(childSocketNum);
 	
 	while (1) { 
 		uint8_t PDU[MAXBUF];

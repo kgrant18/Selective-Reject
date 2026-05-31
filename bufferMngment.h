@@ -17,7 +17,7 @@
 
 
 typedef enum receiverState {
-	INORDER, BUFFERING, FLUSHING, BUFFER_DONE
+	INORDER, BUFFERING, FLUSHING, SEND_EOF_ACK, BUFFER_DONE
 } receiverState;
 
 enum FLAG {
@@ -59,6 +59,7 @@ void bufferManagement(int childSocketNum, int seqNum, int flag, uint8_t *payload
 receiverState inorderFunction(int *expectedSeqNum, int actualSeqNum, int flag, uint8_t *payload, int payloadLen, struct bufferInfo *buffer_struct, int childSocketNum, struct SR_buffer *buffer, int eofSeqNum);
 receiverState bufferingFunction(int *expectedSeqNum, int actualSeqNum, int flag, uint8_t *payload, int payloadLen, struct bufferInfo *buffer_struct, int childSocketNum, struct SR_buffer *buffer, int eofSeqNum);
 receiverState flushingFunction(int *expectedSeqNum, struct bufferInfo *buffer_struct, int childSocketNum, struct SR_buffer *buffer, int eofSeqNum);
+receiverState continuouslySendEOFAck(int childSocketNum, int eofSeqNum, struct bufferInfo *buffer_struct);
 int checkIfBuffered(int seqNum, int window_size, struct SR_buffer *buffer);
 void sendRR(int childSocketNum, int RR_seqNum, struct bufferInfo *buffer_struct);
 void sendSREJ(int childSocketNum, int SREJ_seqNum, struct bufferInfo *buffer_struct);

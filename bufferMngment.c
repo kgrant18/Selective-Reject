@@ -2,6 +2,7 @@
 #include "safeUtil.h"
 #include "checksum.h"
 #include "windowing.h"
+#include "pollLib.h"
 
 struct SR_buffer *initializeBuffer(int window_size) {
     /*
@@ -47,6 +48,11 @@ void bufferManagement(int childSocketNum, int seqNum, int flag, uint8_t *payload
             break; 
         }
 
+        case SEND_EOF_ACK: {
+            tracker->state = continuouslySendEOFAck(childSocketNum, tracker->eofSeqNum, buffer_struct);
+            break;
+        }
+
         case BUFFER_DONE: {
             printf("file transfer complete. Sitting in BUFFER_DONE state\n"); 
             break;
@@ -87,7 +93,7 @@ receiverState inorderFunction(int *expectedSeqNum, int actualSeqNum, int flag, u
         //check if we've reached EOF 
         if (flag == EOF_FLAG) {
             sendEOFAck(childSocketNum, eofSeqNum, buffer_struct);
-            return BUFFER_DONE; 
+            return SEND_EOF_ACK; 
         }
 
         //send the RR acknowledgment
@@ -138,7 +144,7 @@ receiverState bufferingFunction(int *expectedSeqNum, int actualSeqNum, int flag,
         //check if we've reached EOF 
         if (flag == EOF_FLAG) {
             sendEOFAck(childSocketNum, eofSeqNum, buffer_struct);
-            return BUFFER_DONE; 
+            return SEND_EOF_ACK; 
         }
 
         return FLUSHING; 
@@ -196,6 +202,40 @@ receiverState flushingFunction(int *expectedSeqNum, struct bufferInfo *buffer_st
     sendRR(childSocketNum, *expectedSeqNum, buffer_struct);
 
     return INORDER; 
+}
+
+receiverState continuouslySendEOFAck(int childSocketNum, int eofSeqNum, struct bufferInfo *buffer_struct) {
+    /**
+     * Continue to resend EOF ACK packet until it is received. 
+    */
+
+    int counter = 0; 
+ 
+    sendEOFAck(childSocketNum, eofSeqNum, buffer_struct);
+
+    while (counter < 10) {
+        //poll for 1 second
+        int pollResult = pollCall(1000);
+        
+        if (pollResult <  0) {
+            //timeout so hopefully the sender recieved the packet
+            counter++;
+            continue; 
+        }
+
+        else {
+            //recieved something, so send EOF ack packet 
+            uint8_t PDU[MAXBUF];
+            struct sockaddr_in6 client;
+            int clientAddrLen = sizeof(struct sockaddr_in6);
+
+            safeRecvfrom(childSocketNum, PDU, MAXBUF, 0, (struct sockaddr *)&client, &clientAddrLen);
+
+            sendEOFAck(childSocketNum, eofSeqNum, buffer_struct);
+        }
+    }
+    
+    return BUFFER_DONE;
 }
 
 void sendEOFAck(int childSocketNum, int eofSeqNum, struct bufferInfo *buffer_struct) {
